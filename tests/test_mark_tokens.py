@@ -6,13 +6,13 @@ import inspect
 import io
 import os
 import pytest
+from parameterized import parameterized  # type: ignore[import]
 import re
 import sys
 import textwrap
 import token
 from typing import List
 import unittest
-from time import time
 
 import astroid
 import six
@@ -24,6 +24,11 @@ try:
   from astroid.nodes.utils import Position as AstroidPosition
 except Exception:
   AstroidPosition = ()
+
+
+def _parameterize_sys_modules():
+  modules = sorted(sys.modules.keys())
+  return parameterized.expand([(x,) for x in modules])
 
 
 class TestMarkTokens(unittest.TestCase):
@@ -631,8 +636,9 @@ j  # not a complex number, just a name
     self.create_mark_checker(source)
 
   if six.PY3:
+    @_parameterize_sys_modules()
     @pytest.mark.slow
-    def test_sys_modules(self):
+    def test_sys_modules(self, module_name):
       """
       Verify all nodes on source files obtained from sys.modules.
 
@@ -642,49 +648,42 @@ j  # not a complex number, just a name
       """
       from .test_astroid import AstroidTreeException
 
-      modules = list(sys.modules.values())
+      module = sys.modules[module_name]
 
-      start = time()
-      for module in modules:
-        # Don't let this test (which runs twice) take longer than 13 minutes
-        # to avoid the travis build time limit of 30 minutes
-        if time() - start > 13 * 60:
-          break
+      try:
+        filename = inspect.getsourcefile(module)
+      except Exception:  # some modules raise weird errors
+        self.skipTest("Failed to get source file")
 
-        try:
-          filename = inspect.getsourcefile(module)
-        except Exception:  # some modules raise weird errors
-          continue
+      if not filename:
+        self.skipTest("No source file for module")
 
-        if not filename:
-          continue
+      filename = os.path.abspath(filename)
+      print(filename)
+      try:
+        with io.open(filename) as f:
+          source = f.read()
+      except OSError:
+        self.skipTest("Error reading source file")
 
-        filename = os.path.abspath(filename)
-        print(filename)
-        try:
-          with io.open(filename) as f:
-            source = f.read()
-        except OSError:
-          continue
+      if self.is_astroid_test and (
+          # Astroid fails with a syntax error if a type comment is on its own line
+          re.search(r'^\s*# type: ', source, re.MULTILINE)
+      ):
+        self.skipTest("Skipping potential Astroid syntax error")
 
-        if self.is_astroid_test and (
-            # Astroid fails with a syntax error if a type comment is on its own line
-            re.search(r'^\s*# type: ', source, re.MULTILINE)
-        ):
-          print('Skipping', filename)
-          continue
+      try:
+        self.create_mark_checker(source)
+      except AstroidTreeException:
+        # Astroid sometimes fails with errors like:
+        #     AttributeError: 'TreeRebuilder' object has no attribute 'visit_typealias'
+        # See https://github.com/gristlabs/asttokens/actions/runs/6015907789/job/16318767911?pr=110
+        # Should be fixed in the next astroid release:
+        #     https://github.com/pylint-dev/pylint/issues/8782#issuecomment-1669967220
+        # Note that this exception is raised before asttokens is even involved,
+        # it's purely an astroid bug that we can safely ignore.
+        self.skipTest("Skipping Astroid error")
 
-        try:
-          self.create_mark_checker(source)
-        except AstroidTreeException:
-          # Astroid sometimes fails with errors like:
-          #     AttributeError: 'TreeRebuilder' object has no attribute 'visit_typealias'
-          # See https://github.com/gristlabs/asttokens/actions/runs/6015907789/job/16318767911?pr=110
-          # Should be fixed in the next astroid release:
-          #     https://github.com/pylint-dev/pylint/issues/8782#issuecomment-1669967220
-          # Note that this exception is raised before asttokens is even involved,
-          # it's purely an astroid bug that we can safely ignore.
-          continue
 
   if six.PY3:
     def test_dict_merge(self):
